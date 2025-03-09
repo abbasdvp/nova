@@ -1,25 +1,25 @@
 package main
 
 import (
-	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/widget"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
-	"golang.org/x/term"
-	"github.com/urfave/cli/v2"
 )
 
 const (
@@ -28,168 +28,260 @@ const (
 )
 
 var (
-	version = "1.0.0"
+	version = "1.2.0"
 )
 
 func main() {
-	if len(os.Args) > 1 {
-		cliHandler()
-	} else {
-		interactiveHandler()
-	}
+	myApp := app.New()
+	window := myApp.NewWindow("Military Crypto Tool v" + version)
+	window.Resize(fyne.NewSize(800, 600))
+
+	tabs := container.NewAppTabs(
+		createEncryptDecryptTab(window),
+		createKeygenTab(window),
+		createSignVerifyTab(window),
+	)
+
+	window.SetContent(tabs)
+	window.ShowAndRun()
 }
 
-// ######################## CLI Handler ########################
-func cliHandler() {
-	app := &cli.App{
-		Name:    "Military Crypto",
-		Version: version,
-		Usage:   "ابزار پیشرفته رمزنگاری نظامی",
-		Commands: []*cli.Command{
-			{
-				Name:  "encrypt",
-				Usage: "رمزنگاری فایل",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "input", Aliases: []string{"i"}, Required: true},
-					&cli.StringFlag{Name: "key", Aliases: []string{"k"}, Required: true},
-					&cli.StringFlag{Name: "algo", Aliases: []string{"a"}, Value: ModeAES},
-				},
-				Action: func(c *cli.Context) error {
-					data, err := os.ReadFile(c.String("input"))
-					if err != nil {
-						return err
-					}
-					encrypted, err := encrypt(data, []byte(c.String("key")), c.String("algo"))
-					if err != nil {
-						return err
-					}
-					return os.WriteFile(c.String("input")+".enc", encrypted, 0644)
-				},
-			},
-			{
-				Name:  "decrypt",
-				Usage: "رمزگشایی فایل",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "input", Aliases: []string{"i"}, Required: true},
-					&cli.StringFlag{Name: "key", Aliases: []string{"k"}, Required: true},
-					&cli.StringFlag{Name: "algo", Aliases: []string{"a"}, Value: ModeAES},
-				},
-				Action: func(c *cli.Context) error {
-					data, err := os.ReadFile(c.String("input"))
-					if err != nil {
-						return err
-					}
-					decrypted, err := decrypt(data, []byte(c.String("key")), c.String("algo"))
-					if err != nil {
-						return err
-					}
-					return os.WriteFile(strings.TrimSuffix(c.String("input"), ".enc"), decrypted, 0644)
-				},
-			},
-			{
-				Name:  "keygen",
-				Usage: "تولید کلید امنیتی",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "type", Aliases: []string{"t"}, Value: "aes"},
-				},
-				Action: func(c *cli.Context) error {
-					key, err := generateKey(c.String("type"))
-					if err != nil {
-						return err
-					}
-					fileName := c.String("type") + ".key"
-					return os.WriteFile(fileName, key, 0400)
-				},
-			},
-			{
-				Name:  "sign",
-				Usage: "امضای دیجیتال",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "input", Aliases: []string{"i"}, Required: true},
-					&cli.StringFlag{Name: "key", Aliases: []string{"k"}, Required: true},
-				},
-				Action: func(c *cli.Context) error {
-					privateKey, err := os.ReadFile(c.String("key"))
-					if err != nil {
-						return err
-					}
-					signature, err := signFile(c.String("input"), privateKey)
-					if err != nil {
-						return err
-					}
-					return os.WriteFile(c.String("input")+".sig", signature, 0644)
-				},
-			},
-			{
-				Name:  "verify",
-				Usage: "تأیید امضای دیجیتال",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "input", Aliases: []string{"i"}, Required: true},
-					&cli.StringFlag{Name: "key", Aliases: []string{"k"}, Required: true},
-					&cli.StringFlag{Name: "signature", Aliases: []string{"s"}, Required: true},
-				},
-				Action: func(c *cli.Context) error {
-					publicKey, err := os.ReadFile(c.String("key"))
-					if err != nil {
-						return err
-					}
-					signature, err := os.ReadFile(c.String("signature"))
-					if err != nil {
-						return err
-					}
-					valid, err := verifySignature(c.String("input"), publicKey, signature)
-					if err != nil {
-						return err
-					}
-					if valid {
-						fmt.Println("امضا معتبر است!")
-					} else {
-						fmt.Println("امضا نامعتبر است!")
-					}
-					return nil
-				},
-			},
-		},
-	}
+// ######################## Encryption/Decryption Tab ########################
+func createEncryptDecryptTab(window fyne.Window) *container.TabItem {
+	inputEntry := widget.NewEntry()
+	outputEntry := widget.NewEntry()
+	keyEntry := widget.NewEntry()
+	algoSelect := widget.NewSelect([]string{ModeAES, ModeChaCha20}, nil)
+	statusLabel := widget.NewLabel("")
+	operationMode := "Encrypt"
 
-	if err := app.Run(os.Args); err != nil {
-		exitWithError(err)
-	}
+	openFileBtn := widget.NewButton("Select Input File", func() {
+		dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+			if err == nil && reader != nil {
+				inputPath := reader.URI().Path()
+				inputEntry.SetText(inputPath)
+				
+				// Auto-generate output filename
+				ext := filepath.Ext(inputPath)
+				base := strings.TrimSuffix(inputPath, ext)
+				if operationMode == "Encrypt" {
+					outputEntry.SetText(base + ".enc")
+				} else {
+					outputEntry.SetText(base + ".dec")
+				}
+			}
+		}, window)
+	})
+
+	processBtn := widget.NewButton("Encrypt", func() {
+		go processCryptoOperation(inputEntry.Text, outputEntry.Text, 
+			keyEntry.Text, algoSelect.Selected, operationMode, statusLabel)
+	})
+
+	toggleBtn := widget.NewButton("Switch to Decrypt", func() {
+		if operationMode == "Encrypt" {
+			operationMode = "Decrypt"
+			processBtn.SetText("Decrypt")
+			toggleBtn.SetText("Switch to Encrypt")
+		} else {
+			operationMode = "Encrypt"
+			processBtn.SetText("Encrypt")
+			toggleBtn.SetText("Switch to Decrypt")
+		}
+	})
+
+	return container.NewTabItem("Encrypt/Decrypt",
+		container.NewVBox(
+			widget.NewLabel("Input File:"),
+			container.NewHBox(inputEntry, openFileBtn),
+			widget.NewLabel("Output File:"),
+			outputEntry,
+			widget.NewLabel("Encryption Key:"),
+			keyEntry,
+			widget.NewLabel("Algorithm:"),
+			algoSelect,
+			container.NewHBox(processBtn, toggleBtn),
+			statusLabel,
+		),
+	)
 }
 
-// ######################## Interactive Handler ########################
-func interactiveHandler() {
-	clearScreen()
-	showBanner()
+// ######################## Key Generation Tab ########################
+func createKeygenTab(window fyne.Window) *container.TabItem {
+	keyType := widget.NewSelect([]string{"AES-256", "Ed25519", "Curve25519"}, nil)
+	statusLabel := widget.NewLabel("")
 
-	for {
-		showMainMenu()
-		choice := getMenuChoice()
-
-		switch choice {
-		case 1:
-			encryptInteractive()
-		case 2:
-			decryptInteractive()
-		case 3:
-			keygenInteractive()
-		case 4:
-			signInteractive()
-		case 5:
-			verifyInteractive()
-		case 6:
-			fmt.Println("\nخروج با موفقیت انجام شد!")
-			os.Exit(0)
-		default:
-			showError("انتخاب نامعتبر!")
+	generateBtn := widget.NewButton("Generate Key", func() {
+		if keyType.Selected == "" {
+			statusLabel.SetText("Please select key type!")
+			return
 		}
 
-		pause()
-		clearScreen()
-	}
+		var key []byte
+		var err error
+		switch keyType.Selected {
+		case "AES-256":
+			key = make([]byte, 32)
+			_, err = rand.Read(key)
+		case "Ed25519":
+			_, priv, err := ed25519.GenerateKey(rand.Reader)
+			key = priv.Seed()
+		case "Curve25519":
+			priv := make([]byte, curve25519.ScalarSize)
+			if _, err = rand.Read(priv); err == nil {
+				pub, err := curve25519.X25519(priv, curve25519.Basepoint)
+				if err == nil {
+					key = append(priv, pub...)
+				}
+			}
+		}
+
+		if err != nil {
+			statusLabel.SetText("Generation failed: " + err.Error())
+			return
+		}
+
+		dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
+			if err != nil || writer == nil {
+				return
+			}
+
+			if _, err := writer.Write(key); err != nil {
+				statusLabel.SetText("Save failed: " + err.Error())
+				return
+			}
+
+			statusLabel.SetText("Key saved to: " + writer.URI().Path())
+		}, window)
+	})
+
+	return container.NewTabItem("Key Generation",
+		container.NewVBox(
+			widget.NewLabel("Key Type:"),
+			keyType,
+			generateBtn,
+			statusLabel,
+		),
+	)
 }
 
-// ######################## Core Crypto Functions ########################
+// ######################## Sign/Verify Tab ########################
+func createSignVerifyTab(window fyne.Window) *container.TabItem {
+	fileEntry := widget.NewEntry()
+	keyEntry := widget.NewEntry()
+	sigEntry := widget.NewEntry()
+	statusLabel := widget.NewLabel("")
+
+	signBtn := widget.NewButton("Sign File", func() {
+		go func() {
+			if fileEntry.Text == "" || keyEntry.Text == "" {
+				statusLabel.SetText("All fields required!")
+				return
+			}
+
+			privateKey, err := os.ReadFile(keyEntry.Text)
+			if err != nil {
+				statusLabel.SetText("Key read error: " + err.Error())
+				return
+			}
+
+			signature, err := signFile(fileEntry.Text, privateKey)
+			if err != nil {
+				statusLabel.SetText("Signing failed: " + err.Error())
+				return
+			}
+
+			sigPath := fileEntry.Text + ".sig"
+			if err := os.WriteFile(sigPath, signature, 0644); err != nil {
+				statusLabel.SetText("Save failed: " + err.Error())
+				return
+			}
+
+			statusLabel.SetText("Signature saved to: " + sigPath)
+		}()
+	})
+
+	verifyBtn := widget.NewButton("Verify File", func() {
+		go func() {
+			if fileEntry.Text == "" || keyEntry.Text == "" || sigEntry.Text == "" {
+				statusLabel.SetText("All fields required!")
+				return
+			}
+
+			publicKey, err := os.ReadFile(keyEntry.Text)
+			if err != nil {
+				statusLabel.SetText("Key read error: " + err.Error())
+				return
+			}
+
+			signature, err := os.ReadFile(sigEntry.Text)
+			if err != nil {
+				statusLabel.SetText("Signature read error: " + err.Error())
+				return
+			}
+
+			valid, err := verifySignature(fileEntry.Text, publicKey, signature)
+			if err != nil {
+				statusLabel.SetText("Verification error: " + err.Error())
+				return
+			}
+
+			if valid {
+				statusLabel.SetText("✅ Signature is valid!")
+			} else {
+				statusLabel.SetText("❌ Signature is invalid!")
+			}
+		}()
+	})
+
+	return container.NewTabItem("Digital Signature",
+		container.NewVBox(
+			widget.NewLabel("File to sign/verify:"),
+			fileEntry,
+			widget.NewLabel("Key file:"),
+			keyEntry,
+			widget.NewLabel("Signature file:"),
+			sigEntry,
+			container.NewHBox(signBtn, verifyBtn),
+			statusLabel,
+		),
+	)
+}
+
+// ######################## Core Cryptographic Functions ########################
+func processCryptoOperation(inputPath, outputPath, key, algorithm, mode string, status *widget.Label) {
+	if inputPath == "" || outputPath == "" || key == "" {
+		status.SetText("Error: All fields are required!")
+		return
+	}
+
+	data, err := os.ReadFile(inputPath)
+	if err != nil {
+		status.SetText("Read error: " + err.Error())
+		return
+	}
+
+	var result []byte
+	switch mode {
+	case "Encrypt":
+		result, err = encrypt(data, []byte(key), algorithm)
+	case "Decrypt":
+		result, err = decrypt(data, []byte(key), algorithm)
+	}
+
+	if err != nil {
+		status.SetText("Operation failed: " + err.Error())
+		return
+	}
+
+	if err := os.WriteFile(outputPath, result, 0644); err != nil {
+		status.SetText("Write error: " + err.Error())
+		return
+	}
+
+	status.SetText("✅ Operation completed successfully!")
+}
+
 func encrypt(data []byte, key []byte, algorithm string) ([]byte, error) {
 	switch algorithm {
 	case ModeAES:
@@ -197,7 +289,7 @@ func encrypt(data []byte, key []byte, algorithm string) ([]byte, error) {
 	case ModeChaCha20:
 		return chachaEncrypt(data, key)
 	default:
-		return nil, errors.New("الگوریتم نامشخص")
+		return nil, errors.New("unsupported algorithm")
 	}
 }
 
@@ -208,7 +300,7 @@ func decrypt(data []byte, key []byte, algorithm string) ([]byte, error) {
 	case ModeChaCha20:
 		return chachaDecrypt(data, key)
 	default:
-		return nil, errors.New("الگوریتم نامشخص")
+		return nil, errors.New("unsupported algorithm")
 	}
 }
 
@@ -224,7 +316,7 @@ func aesEncrypt(plaintext []byte, key []byte) ([]byte, error) {
 	}
 
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+	if _, err = rand.Read(nonce); err != nil {
 		return nil, err
 	}
 
@@ -244,7 +336,7 @@ func aesDecrypt(ciphertext []byte, key []byte) ([]byte, error) {
 
 	nonceSize := gcm.NonceSize()
 	if len(ciphertext) < nonceSize {
-		return nil, errors.New("متن رمز کوتاه است")
+		return nil, errors.New("invalid ciphertext")
 	}
 
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
@@ -273,39 +365,13 @@ func chachaDecrypt(ciphertext []byte, key []byte) ([]byte, error) {
 
 	nonceSize := aead.NonceSize()
 	if len(ciphertext) < nonceSize {
-		return nil, errors.New("متن رمز کوتاه است")
+		return nil, errors.New("invalid ciphertext")
 	}
 
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	return aead.Open(nil, nonce, ciphertext, nil)
 }
 
-// ######################## Key Management ########################
-func generateKey(keyType string) ([]byte, error) {
-	switch keyType {
-	case "aes":
-		key := make([]byte, 32)
-		_, err := rand.Read(key)
-		return key, err
-	case "ed25519":
-		_, priv, err := ed25519.GenerateKey(rand.Reader)
-		return priv.Seed(), err
-	case "curve25519":
-		priv := make([]byte, curve25519.ScalarSize)
-		if _, err := rand.Read(priv); err != nil {
-			return nil, err
-		}
-		pub, err := curve25519.X25519(priv, curve25519.Basepoint)
-		if err != nil {
-			return nil, err
-		}
-		return append(priv, pub...), nil
-	default:
-		return nil, errors.New("نوع کلید نامعتبر")
-	}
-}
-
-// ######################## Digital Signature ########################
 func signFile(filePath string, privateKey []byte) ([]byte, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -313,8 +379,8 @@ func signFile(filePath string, privateKey []byte) ([]byte, error) {
 	}
 
 	hash := sha256.Sum256(data)
-	privateKey = ed25519.NewKeyFromSeed(privateKey)
-	return ed25519.Sign(privateKey, hash[:]), nil
+	priv := ed25519.NewKeyFromSeed(privateKey)
+	return ed25519.Sign(priv, hash[:]), nil
 }
 
 func verifySignature(filePath string, publicKey []byte, signature []byte) (bool, error) {
@@ -325,72 +391,4 @@ func verifySignature(filePath string, publicKey []byte, signature []byte) (bool,
 
 	hash := sha256.Sum256(data)
 	return ed25519.Verify(publicKey, hash[:], signature), nil
-}
-
-// ######################## UI Components ########################
-func showMainMenu() {
-	colorPrint("cyan", "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓")
-	colorPrint("cyan", "┃        "+colorText("yellow", "منوی اصلی")+"        ┃")
-	colorPrint("cyan", "┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫")
-	colorPrint("cyan", "┃ 1. رمزنگاری فایل           ┃")
-	colorPrint("cyan", "┃ 2. رمزگشایی فایل           ┃")
-	colorPrint("cyan", "┃ 3. تولید کلید امنیتی       ┃")
-	colorPrint("cyan", "┃ 4. امضای دیجیتال           ┃")
-	colorPrint("cyan", "┃ 5. تأیید امضای دیجیتال     ┃")
-	colorPrint("cyan", "┃ 6. خروج                    ┃")
-	colorPrint("cyan", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛")
-	fmt.Print(colorText("cyan", "➤ انتخاب شما: "))
-}
-
-func getMenuChoice() int {
-	var choice int
-	fmt.Scanln(&choice)
-	return choice
-}
-
-func clearScreen() {
-	fmt.Print("\033[H\033[2J")
-}
-
-func pause() {
-	fmt.Print("\n↵ برای ادامه کلیدی را فشار دهید...")
-	bufio.NewReader(os.Stdin).ReadBytes('\n') 
-}
-
-func exitWithError(err error) {
-	fmt.Printf("\n%s %v\n", colorText("red", "✗ خطا:"), err)
-	os.Exit(1)
-}
-
-func colorText(color string, text string) string {
-	colorCodes := map[string]string{
-		"red":    "\033[31m",
-		"green":  "\033[32m",
-		"yellow": "\033[33m",
-		"cyan":   "\033[36m",
-		"reset":  "\033[0m",
-	}
-	return colorCodes[color] + text + colorCodes["reset"]
-}
-
-func colorPrint(color string, text string) {
-	fmt.Println(colorText(color, text))
-}
-
-func showBanner() {
-	fmt.Println(colorText("yellow", `
-   ▄▄▄▄▄    ▄  █ ████▄ █▄▄▄▄ 
-  █     ▀▄ █   █ █   █ █  ▄▀ 
-▄  ▀▀▀▀▄   ██▀▀█ █   █ █▀▀▌  
- ▀▄▄▄▄▀    █   █ ▀████ █  █  
-              █            █  
-             ▀            ▀   `))
-	fmt.Println(colorText("cyan", "  ابزار رمزنگاری پیشرفته نظامی\n"))
-}
-
-func init() {
-	if runtime.GOOS == "windows" {
-		// غیرفعال کردن رنگ‌ها در ویندوز
-		colorText = func(color string, text string) string { return text }
-	}
 }
